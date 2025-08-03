@@ -9,7 +9,7 @@ use itertools::Itertools;
 use super::super::graph::{
     EnumMatch, FlowControlGraphBuilder, FlowControlNode, FlowControlVar, NodeId,
 };
-use super::filtered_patterns::FilteredPatterns;
+use super::filtered_patterns::{Bindings, FilteredPatterns};
 use crate::ids::LocationId;
 use crate::lower::context::LoweringContext;
 
@@ -60,7 +60,15 @@ pub fn create_node_for_patterns<'db>(
     // If all the patterns are catch-all, we do not need to look into `input_var`.
     if patterns.iter().all(|pattern| pattern_is_any(pattern)) {
         // Call the callback with all patterns accepted.
-        return build_node_callback(graph, FilteredPatterns::all(patterns.len()));
+        let filter = FilteredPatterns::all_with_bindings(patterns.iter().map(|pattern| {
+            if let Some(semantic::Pattern::Variable(pattern_variable)) = pattern {
+                let pattern_var = graph.register_pattern_var(pattern_variable.clone());
+                Bindings::single(input_var, pattern_var)
+            } else {
+                Bindings::default()
+            }
+        }));
+        return build_node_callback(graph, filter);
     }
 
     let (n_snapshots, long_ty) = peel_snapshots(ctx.db, graph.var_ty(input_var));
@@ -110,14 +118,26 @@ fn create_node_for_enum<'db>(
                 inner_pattern,
                 ..
             })) => {
-                variant_to_pattern_indices[variant.idx].add(idx);
+                variant_to_pattern_indices[variant.idx].add(idx, Bindings::default());
                 variant_to_inner_patterns[variant.idx]
                     .push(inner_pattern.map(|inner_pattern| get_pattern(ctx, inner_pattern)));
             }
             Some(semantic::Pattern::Otherwise(..)) | None => {
                 // Add `idx` to all the variants.
                 for pattern_indices in variant_to_pattern_indices.iter_mut() {
-                    pattern_indices.add(idx);
+                    pattern_indices.add(idx, Bindings::default());
+                }
+                // Add the `_` pattern (represented by `None`) to all the variants.
+                for inner_patterns in variant_to_inner_patterns.iter_mut() {
+                    inner_patterns.push(None);
+                }
+            }
+            Some(semantic::Pattern::Variable(pattern_variable)) => {
+                // Add `idx` to all the variants.
+                let pattern_var = graph.register_pattern_var(pattern_variable.clone());
+                let bindings = Bindings::single(input_var, pattern_var);
+                for pattern_indices in variant_to_pattern_indices.iter_mut() {
+                    pattern_indices.add(idx, bindings.clone());
                 }
                 // Add the `_` pattern (represented by `None`) to all the variants.
                 for inner_patterns in variant_to_inner_patterns.iter_mut() {
